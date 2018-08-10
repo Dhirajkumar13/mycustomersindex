@@ -1,2 +1,3 @@
 #MyCustomers 
-this is index.js
+This file is not gona allow repeated data to insert
+
