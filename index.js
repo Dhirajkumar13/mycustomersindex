@@ -1,100 +1,133 @@
-const MongoClient = require('mongodb').MongoClient;
-var express = require('express');
-var mongodb = require('mongodb');
-var app = express();
-var bodyParser = require('body-parser');
-var async = require('async');
+// server.js
+const express = require('express');
+const cors = require('cors');
+const { MongoClient } = require('mongodb');
 
-var cors = require('cors');
+const app = express();
 
+// Middleware
 app.use(cors());
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
+// Config (override via env if you like)
+const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017';
+const DB_NAME = process.env.DB_NAME || 'project';
+const PORT = process.env.PORT || 9090;
 
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+let client;
+let db;
 
-app.listen(9090, function () {
-  console.log('server running at http://localhost:9090');
-});
+/**
+ * Connect to MongoDB and start the server
+ */
+async function start() {
+  try {
+    client = new MongoClient(MONGO_URL);
+    await client.connect();
+    db = client.db(DB_NAME);
+    console.log('Successfully connected to MongoDB!!');
 
-const url = "mongodb://localhost:27017/";
-var dbName = 'project';
-var db = null;
+    app.listen(PORT, () => {
+      console.log(`server running at http://localhost:${PORT}`);
+    });
 
-// Connection with MongoDb
-MongoClient.connect(url, function (err, client) {
-  if (err) {
-    console.log("Error while connecting to mongo. Make sure mongodb is running");
-  } else {
-    console.log("Successfully connected to MongoDB!!");
-    db = client.db(dbName);
-  }
-});
-
-
-// 'Replace / with /<collections_name>'
-// app.get('/mycollection', function (req, res) {
-//   console.log("Inside GET / ");
-//   if(db != null) {
-//    db.collection("mycollection").find({}).toArray(function(err, result) {
-//       if (err) throw err;
-//       console.log(result);
-//       res.send(result);
-//       var myobj = {first_name : "king"};
-//       db.collection("mycollection").insertOne({}, function(err, res) {
-//         if (err) throw err;
-//         console.log("1 Document inserted");
-
-//       });
-//   })
-// } 
-// });
-
-
-
-// app.post('/mycustomers', function(req,res){
-//   if(db != null)
-//   {
-//     var myobj = req.body;
-// 	console.log(JSON.stringify(myobj));
-//      db.collection("customers").insertOne(myobj, function(err,result){
-//        if(err) throw err;
-//        console.log("Documents inserted");
-// 	    console.log(JSON.stringify(result)); 
-
-//        res.send(result);
-//       })
-app.get('/', function (req, res) {
-  console.log("Inside GET / ");
-  if (db != null) {
-    async.waterfall({
-      function(callback) {
-        db.collection("customers").find({ first_name: "Dhiraj" }).toArray(function (err, result) {
-          if (err) throw err;
-          callback(err, null)
-          console.log("1 document found");
-          
-          
-          if (result == null) {
-            var myobj = { first_name: "Dhiraj", last_name: "Kumar" };
-            db.collection("customers").insertOne(myobj, function (err, rest) {
-              if (err) throw err;
-              console.log("1 document inserted");
-              callback(null,result,rest);
-            }
-            )
-          }
-        })
-      },
-      function(result,rest,callback){
-        console.log(result); 
-        console.log(rest);
-        callback(null);
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+      try {
+        console.log('\nShutting down...');
+        await client.close();
+        process.exit(0);
+      } catch (e) {
+        console.error('Error during shutdown:', e);
+        process.exit(1);
       }
-
-
-
-
-    })
+    });
+  } catch (err) {
+    console.error('Error while connecting to mongo. Make sure mongodb is running');
+    console.error(err);
+    process.exit(1);
   }
-})
+}
+
+/**
+ * Health route (optional)
+ */
+app.get('/health', (req, res) => {
+  res.json({ ok: true, dbConnected: !!db });
+});
+
+/**
+ * GET /
+ * - Looks for a customer with first_name: "Dhiraj"
+ * - If not found, inserts { first_name: "Dhiraj", last_name: "Kumar" }
+ * - Returns the found/inserted document and an action indicator
+ */
+app.get('/', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ error: 'Database not connected' });
+
+    const customers = db.collection('customers');
+
+    // Try to find one document
+    const existing = await customers.findOne({ first_name: 'Dhiraj' });
+
+    if (existing) {
+      console.log('Document found');
+      return res.json({ action: 'found', data: existing });
+    }
+
+    // Not found — insert new
+    const doc = { first_name: 'Dhiraj', last_name: 'Kumar' };
+    const insertRes = await customers.insertOne(doc);
+
+    const inserted = { _id: insertRes.insertedId, ...doc };
+    console.log('1 document inserted');
+
+    return res.json({ action: 'inserted', data: inserted });
+  } catch (err) {
+    console.error('Error in GET /:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+/**
+ * POST /customers
+ * - Inserts the JSON body as a new customer document
+ * - Example body: { "first_name": "Jane", "last_name": "Doe" }
+ */
+app.post('/customers', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ error: 'Database not connected' });
+
+    const body = req.body || {};
+    if (!Object.keys(body).length) {
+      return res.status(400).json({ error: 'Request body is empty' });
+    }
+
+    const result = await db.collection('customers').insertOne(body);
+    return res.status(201).json({ insertedId: result.insertedId, data: body });
+  } catch (err) {
+    console.error('Error in POST /customers:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+/**
+ * GET /customers
+ * - Returns all customers (basic helper route)
+ */
+app.get('/customers', async (req, res) => {
+  try {
+    if (!db) return res.status(500).json({ error: 'Database not connected' });
+
+    const all = await db.collection('customers').find({}).toArray();
+    return res.json(all);
+  } catch (err) {
+    console.error('Error in GET /customers:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Start the app
+start();
